@@ -1,5 +1,6 @@
 
 from pathlib import Path
+import json
 
 from document_processing.questionnaire_reader import read_questionnaire
 from llm.questionnaire_extractor import extract_from_questionnaire

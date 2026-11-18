@@ -1,0 +1,134 @@
+
+from pathlib import Path
+
+from document_processing.questionnaire_reader import read_questionnaire
+from llm.questionnaire_extractor import extract_from_questionnaire
+from processing.missing_fields_detector import detect_missing_fields
+
+
+# ============================================================
+# STEP 1: Configuration
+# ============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+questionnaire_path = PROJECT_ROOT / "questionnaire.pptx"
+
+company_name = "Assessli"
+product_name = "Dotsin"
+
+# Project output directory
+OUTPUT_DIR = PROJECT_ROOT / "output"
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+OUTPUT_FILE = OUTPUT_DIR / "questionnaire_extraction.json"
+
+
+# ============================================================
+# STEP 2: Check questionnaire file
+# ============================================================
+
+if not questionnaire_path.exists():
+    raise FileNotFoundError(
+        f"Questionnaire not found: {questionnaire_path}"
+    )
+
+print("=" * 60)
+print("ONE-PAGER GENERATOR - QUESTIONNAIRE EXTRACTION TEST")
+print("=" * 60)
+
+print(f"Company: {company_name}")
+print(f"Product: {product_name}")
+print(f"Questionnaire: {questionnaire_path.name}")
+
+
+# ============================================================
+# STEP 3: Read questionnaire
+# ============================================================
+
+print("\n[1/4] Reading questionnaire...")
+
+with open(questionnaire_path, "rb") as questionnaire_file:
+    questionnaire_data = read_questionnaire(questionnaire_file)
+
+questionnaire_text = questionnaire_data["extracted_text"]
+
+if not questionnaire_text or not questionnaire_text.strip():
+    raise ValueError("No text could be extracted from the questionnaire.")
+
+print("Questionnaire read successfully.")
+print(f"Extracted characters: {len(questionnaire_text)}")
+
+
+# ============================================================
+# STEP 4: Extract information using Ollama
+# ============================================================
+
+print("\n[2/4] Sending questionnaire to Ollama...")
+print("This may take some time depending on your model.")
+
+extracted_data = extract_from_questionnaire(
+    questionnaire_text=questionnaire_text,
+    company_name=company_name,
+    product_name=product_name
+)
+
+print("\n[3/4] Pydantic validation successful.")
+
+
+# ============================================================
+# STEP 5: Detect Missing Fields
+# ============================================================
+
+print("\nDetecting missing fields...")
+
+missing_result = detect_missing_fields(extracted_data)
+
+print("\n========== MISSING FIELD REPORT ==========")
+
+print("\nCompany missing fields:")
+for field in missing_result["company"]["missing_fields"]:
+    print("-", field)
+
+print("\nProduct missing fields:")
+for field in missing_result["product"]["missing_fields"]:
+    print("-", field)
+
+print("\nTotal missing fields:",
+      len(missing_result["all_missing_fields"]))
+
+
+# Save missing-field report
+MISSING_FILE = OUTPUT_DIR / "missing_fields.json"
+
+MISSING_FILE.write_text(
+    json.dumps(missing_result, indent=2),
+    encoding="utf-8"
+)
+
+print("\nMissing-field report saved to:", MISSING_FILE)
+
+# ============================================================
+# STEP 5: Convert extraction to JSON
+# ============================================================
+
+result_json = extracted_data.model_dump_json(indent=2)
+
+print("\n========== FINAL QUESTIONNAIRE JSON ==========")
+print(result_json)
+
+
+# ============================================================
+# STEP 6: Save JSON output
+# ============================================================
+
+OUTPUT_FILE.write_text(
+    result_json,
+    encoding="utf-8"
+)
+
+print("\n[4/4] Extraction completed successfully.")
+print(f"JSON saved to: {OUTPUT_FILE}")
+
+print("=" * 60)

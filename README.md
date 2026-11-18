@@ -1,0 +1,1 @@
+ python -c "from llm.questionnaire_extractor import get_extraction_definitions; d=get_extraction_definitions(); print('Company fields:', len(d['company'])); print('Product fields:', len(d['product'])); print('Employee definition:', d['company']['employee_count'])"

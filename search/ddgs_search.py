@@ -1,0 +1,560 @@
+ 
+import re
+import time
+
+from ddgs import DDGS
+from urllib.parse import urlparse
+
+
+# ============================================================
+# Search configuration
+# ============================================================
+
+MAX_RESULTS_PER_QUERY = 5
+
+# Free search engines rate-limit quickly. Pause between queries and
+# retry empty/failed searches instead of silently returning nothing.
+SEARCH_RETRIES = 3
+RETRY_DELAY_SECONDS = 2.0
+QUERY_PAUSE_SECONDS = 1.0
+
+# Domains that never prove ownership of a company website
+NON_OFFICIAL_DOMAINS = (
+    "linkedin.com", "facebook.com", "twitter.com", "x.com",
+    "instagram.com", "youtube.com", "wikipedia.org", "crunchbase.com",
+    "glassdoor.com", "g2.com", "capterra.com", "pitchbook.com",
+    "zoominfo.com", "bloomberg.com", "reddit.com", "medium.com"
+)
+
+
+# Field-specific search terms
+FIELD_SEARCH_TERMS = {
+    "employee_count": "employees company size workforce",
+    "headquarters": "headquarters registered office location",
+    "funding": "funding investment amount raised",
+    "revenue": "annual revenue company revenue",
+    "gtm_partners": "official partners resellers distributors channel partners",
+    "key_customers": "customers clients case studies customer stories",
+    "competitors": "competitors alternatives competing products",
+    "route_to_market": "sales distribution business model go to market",
+    "inference_hardware": "AI inference hardware infrastructure",
+    "training_hardware": "AI model training hardware GPUs",
+    "models": "AI machine learning models architectures",
+    "ai_framework": "AI development training frameworks",
+    "serving_framework": "AI model serving inference frameworks",
+    "additional_ai_software_stack": "AI software technology stack infrastructure",
+    "vertical_market": "industries vertical markets use cases",
+    "description": "product features capabilities overview",
+    "deployment_type": "deployment cloud on-premises edge hybrid",
+    "overview": "about us what we do company overview"
+}
+
+
+# Fields where official sources are preferred
+OFFICIAL_PRIORITY_FIELDS = {
+    "overview",
+    "deployment_type",
+    "employee_count",
+    "headquarters",
+    "gtm_partners",
+    "key_customers",
+    "route_to_market",
+    "description",
+    "vertical_market",
+    "models",
+    "ai_framework",
+    "serving_framework",
+    "additional_ai_software_stack",
+    "training_hardware",
+    "inference_hardware"
+}
+
+
+# ============================================================
+# Domain utilities
+# ============================================================
+
+def get_domain(url):
+    """Extract and normalize the domain from a URL."""
+
+    try:
+        domain = urlparse(url).netloc.lower()
+        domain = domain.split(":")[0]
+
+        if domain.startswith("www."):
+            domain = domain[4:]
+
+        return domain
+
+    except Exception:
+        return ""
+
+
+def classify_source(url, official_domain=None):
+    """
+    Classify a search result.
+
+    Priority:
+    1. Verified official company domain
+    2. LinkedIn company pages
+    3. Other sources
+    """
+
+    domain = get_domain(url)
+
+    if official_domain:
+
+        official_domain = official_domain.lower().strip()
+
+        official_domain = official_domain.replace(
+            "https://", ""
+        ).replace("http://", "")
+
+        official_domain = official_domain.split("/")[0]
+
+        if official_domain.startswith("www."):
+            official_domain = official_domain[4:]
+
+        if (
+            domain == official_domain
+            or domain.endswith("." + official_domain)
+        ):
+            return "official_website"
+
+    if domain == "linkedin.com" or domain.endswith(".linkedin.com"):
+        return "linkedin"
+
+    return "other"
+
+
+def get_source_priority(source_type):
+    """Lower number means higher priority."""
+
+    priorities = {
+        "official_website": 1,
+        "linkedin": 2,
+        "other": 3
+    }
+
+    return priorities.get(source_type, 4)
+
+
+# ============================================================
+# Search query generation
+# ============================================================
+
+def build_search_queries(
+    company_name,
+    product_name,
+    section,
+    field
+):
+    """
+    Generate one or more targeted search queries.
+
+    Employee count receives separate official website
+    and LinkedIn searches.
+    """
+
+    company = f'"{company_name}"'
+
+    product = ""
+
+    if product_name:
+        product = f'"{product_name}"'
+
+    search_term = FIELD_SEARCH_TERMS.get(
+        field,
+        field.replace("_", " ")
+    )
+
+    # --------------------------------------------------------
+    # Employee count: dedicated searches
+    # --------------------------------------------------------
+
+    if field == "employee_count":
+
+        return [
+            f'{company} employee count official website',
+            f'site:linkedin.com/company/ {company} employees',
+            f'{company} company size number of employees'
+        ]
+
+    # --------------------------------------------------------
+    # Headquarters
+    # --------------------------------------------------------
+
+    if field == "headquarters":
+
+        return [
+            f'{company} headquarters official',
+            f'{company} company registered office location'
+        ]
+
+    # --------------------------------------------------------
+    # GTM partners
+    # --------------------------------------------------------
+
+    if field == "gtm_partners":
+
+        return [
+            f'{company} official partners',
+            f'{company} reseller distributor channel partner',
+            f'{company} technology implementation partners'
+        ]
+
+    # --------------------------------------------------------
+    # Key customers
+    # --------------------------------------------------------
+
+    if field == "key_customers":
+
+        return [
+            f'{company} customers official case studies',
+            f'{company} client success stories',
+            f'{company} organizations using customer'
+        ]
+
+    # --------------------------------------------------------
+    # Competitors
+    # --------------------------------------------------------
+
+    if field == "competitors":
+
+        return [
+            f'{company} competitors',
+            f'{company} alternatives competing products',
+            f'{company} market competitors comparison'
+        ]
+
+    # --------------------------------------------------------
+    # Funding and revenue
+    # --------------------------------------------------------
+
+    if field == "funding":
+
+        return [
+            f'{company} funding amount raised investment',
+            f'{company} funding rounds investors'
+        ]
+
+    if field == "revenue":
+
+        return [
+            f'{company} annual revenue financial information',
+            f'{company} estimated revenue'
+        ]
+
+    # --------------------------------------------------------
+    # Other company and product fields
+    # --------------------------------------------------------
+
+    if section == "company":
+
+        return [
+            f'{company} {search_term}',
+            f'{company} official {search_term}'
+        ]
+
+    return [
+        f'{company} {product} {search_term}',
+        f'{product} {company_name} official product information'
+    ]
+
+
+# Backward-compatible function
+def build_search_query(
+    company_name,
+    product_name,
+    section,
+    field
+):
+    """
+    Generate the first targeted query.
+
+    Retained for compatibility with existing code.
+    """
+
+    queries = build_search_queries(
+        company_name,
+        product_name,
+        section,
+        field
+    )
+
+    return queries[0] if queries else ""
+
+
+# ============================================================
+# Web search
+# ============================================================
+
+def search_web(
+    query,
+    max_results=MAX_RESULTS_PER_QUERY,
+    retries=SEARCH_RETRIES
+):
+    """
+    Search the web using DDGS.
+
+    Retries when the engine returns nothing or raises (rate limit).
+
+    Returns:
+        title
+        url
+        snippet
+        domain
+    """
+
+    results = []
+
+    for attempt in range(1, retries + 1):
+
+        try:
+
+            with DDGS() as ddgs:
+
+                search_results = list(
+                    ddgs.text(
+                        query,
+                        max_results=max_results
+                    )
+                )
+
+            for item in search_results:
+
+                url = item.get("href", "") or item.get("url", "")
+
+                if not url:
+                    continue
+
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "snippet": item.get("body", ""),
+                    "domain": get_domain(url)
+                })
+
+            if results:
+                return results
+
+            print(
+                f"No results (attempt {attempt}/{retries}): {query}"
+            )
+
+        except Exception as error:
+
+            print(
+                f"Search failed (attempt {attempt}/{retries}): {query}"
+            )
+            print("Error:", error)
+
+        if attempt < retries:
+            time.sleep(RETRY_DELAY_SECONDS * attempt)
+
+    return results
+
+
+# ============================================================
+# Official website discovery
+# ============================================================
+
+def find_official_domain(company_name, product_name=None):
+    """
+    Find the company's official website domain.
+
+    Without it every result is classified as "other" and the
+    official site is never prioritised or auto-trusted.
+
+    Returns the domain (e.g. "assessli.com") or None.
+    """
+
+    compact_name = re.sub(r"[^a-z0-9]", "", company_name.lower())
+
+    if len(compact_name) < 3:
+        return None
+
+    queries = [
+        f'"{company_name}" official website',
+        f'{company_name} {product_name or ""} homepage'.strip()
+    ]
+
+    for query in queries:
+
+        for result in search_web(query, max_results=8):
+
+            domain = result.get("domain", "")
+
+            if not domain:
+                continue
+
+            if any(
+                domain == item or domain.endswith("." + item)
+                for item in NON_OFFICIAL_DOMAINS
+            ):
+                continue
+
+            compact_domain = re.sub(r"[^a-z0-9]", "", domain)
+
+            if compact_name in compact_domain:
+                print("Official domain found:", domain)
+                return domain
+
+        time.sleep(QUERY_PAUSE_SECONDS)
+
+    print("Official domain could not be determined.")
+
+    return None
+
+
+# ============================================================
+# Result ranking and duplicate removal
+# ============================================================
+
+def rank_and_deduplicate_results(
+    results,
+    official_domain=None
+):
+    """
+    Remove duplicate URLs and prioritize sources.
+
+    Priority:
+        Official website
+        LinkedIn
+        Other sources
+    """
+
+    unique_results = {}
+
+    for result in results:
+
+        url = result.get("url", "").strip()
+
+        if not url:
+            continue
+
+        normalized_url = url.rstrip("/").lower()
+
+        source_type = classify_source(
+            url,
+            official_domain
+        )
+
+        result["source_type"] = source_type
+        result["source_priority"] = get_source_priority(
+            source_type
+        )
+
+        if normalized_url not in unique_results:
+
+            unique_results[normalized_url] = result
+
+    sorted_results = sorted(
+        unique_results.values(),
+        key=lambda item: item["source_priority"]
+    )
+
+    return sorted_results
+
+
+# ============================================================
+# Search missing fields
+# ============================================================
+
+def search_missing_fields(
+    company_name,
+    product_name,
+    missing_report,
+    max_results=MAX_RESULTS_PER_QUERY,
+    official_domain=None
+):
+    """
+    Search only for missing fields.
+
+    Results are grouped by field.
+
+    official_domain:
+        Optional verified company domain.
+        Example: assessli.com
+    """
+
+    search_output = {}
+
+    missing_fields = missing_report.get(
+        "all_missing_fields", []
+    )
+
+    print("\n========== TARGETED WEB SEARCH ==========")
+
+    for index, field_info in enumerate(
+        missing_fields,
+        start=1
+    ):
+
+        section = field_info["section"]
+        field = field_info["field"]
+
+        queries = build_search_queries(
+            company_name=company_name,
+            product_name=product_name,
+            section=section,
+            field=field
+        )
+
+        print(
+            f"\n[{index}/{len(missing_fields)}] "
+            f"Searching: {field}"
+        )
+
+        all_results = []
+
+        # Run multiple targeted searches
+        for query_index, query in enumerate(
+            queries,
+            start=1
+        ):
+
+            print(
+                f"\nQuery {query_index}/{len(queries)}:"
+            )
+            print(query)
+
+            results = search_web(
+                query=query,
+                max_results=max_results
+            )
+
+            all_results.extend(results)
+
+            print("Results found:", len(results))
+
+            time.sleep(QUERY_PAUSE_SECONDS)
+
+        # Rank and remove duplicates
+        ranked_results = rank_and_deduplicate_results(
+            all_results,
+            official_domain=official_domain
+        )
+
+        search_output[field] = {
+            "section": section,
+            "queries": queries,
+            "query": queries[0] if queries else "",
+            "results": ranked_results
+        }
+
+        print(
+            "\nUnique results:",
+            len(ranked_results)
+        )
+
+        for result in ranked_results:
+
+            print(
+                f"- [{result['source_type']}] "
+                f"{result['title']}"
+            )
+
+            print(" ", result["url"])
+
+    return search_output

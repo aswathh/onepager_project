@@ -1,0 +1,189 @@
+ 
+import json
+from pathlib import Path
+
+from search.ddgs_search import (
+    search_missing_fields,
+    find_official_domain
+)
+from processing.company_identity import (
+    filter_search_results_by_identity
+)
+
+
+# ============================================================
+# STEP 1: Project paths
+# ============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+OUTPUT_DIR = PROJECT_ROOT / "output"
+
+EXTRACTION_FILE = OUTPUT_DIR / "questionnaire_extraction.json"
+MISSING_FILE = OUTPUT_DIR / "missing_fields.json"
+
+SEARCH_OUTPUT_FILE = OUTPUT_DIR / "search_results.json"
+
+
+# ============================================================
+# STEP 2: Load previous extraction and missing fields
+# ============================================================
+
+if not EXTRACTION_FILE.exists():
+    raise FileNotFoundError(
+        f"Extraction file not found: {EXTRACTION_FILE}"
+    )
+
+if not MISSING_FILE.exists():
+    raise FileNotFoundError(
+        f"Missing-field report not found: {MISSING_FILE}"
+    )
+
+with open(EXTRACTION_FILE, "r", encoding="utf-8") as file:
+    extracted_data = json.load(file)
+
+with open(MISSING_FILE, "r", encoding="utf-8") as file:
+    missing_report = json.load(file)
+
+
+# ============================================================
+# STEP 3: Get company and product names
+# ============================================================
+
+company_name = extracted_data["company"]["company_name"]
+product_name = extracted_data["product"]["product_name"]
+
+print("=" * 60)
+print("ONE-PAGER GENERATOR - TARGETED WEB SEARCH")
+print("=" * 60)
+
+print("Company:", company_name)
+print("Product:", product_name)
+
+print(
+    "Missing fields:",
+    len(missing_report.get("all_missing_fields", []))
+)
+
+
+# ============================================================
+# STEP 4: Find the official website, then search missing fields
+# ============================================================
+
+official_domain = find_official_domain(
+    company_name=company_name,
+    product_name=product_name
+)
+
+print("Official domain:", official_domain)
+
+search_results = search_missing_fields(
+    company_name=company_name,
+    product_name=product_name,
+    missing_report=missing_report,
+    max_results=5,
+    official_domain=official_domain
+)
+
+print("\nRaw search completed.")
+
+
+# ============================================================
+# STEP 5: Verify company identity
+# ============================================================
+
+print("\n" + "=" * 60)
+print("COMPANY IDENTITY VERIFICATION")
+print("=" * 60)
+
+# The official domain found above is used for verification.
+
+verified_results = filter_search_results_by_identity(
+    search_output=search_results,
+    company_name=company_name,
+    official_domain=official_domain
+)
+
+
+# ============================================================
+# STEP 6: Display verification summary
+# ============================================================
+
+total_raw = 0
+total_verified = 0
+total_rejected = 0
+
+for field, field_data in verified_results.items():
+
+    accepted = field_data.get("results", [])
+    rejected = field_data.get("rejected_results", [])
+
+    total_raw += len(accepted) + len(rejected)
+    total_verified += len(accepted)
+    total_rejected += len(rejected)
+
+    print(f"\nField: {field}")
+    print("Verified results:", len(accepted))
+    print("Rejected results:", len(rejected))
+
+    for result in accepted:
+        print(
+            "[VERIFIED]",
+            result.get("title", "")
+        )
+        print("URL:", result.get("url", ""))
+        print(
+            "Reason:",
+            result.get("identity_reason", "")
+        )
+
+    for result in rejected:
+        print(
+            "[REJECTED]",
+            result.get("title", "")
+        )
+        print(
+            "Reason:",
+            result.get("identity_reason", "")
+        )
+
+
+# ============================================================
+# STEP 7: Save identity-filtered search results
+# ============================================================
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+with open(
+    SEARCH_OUTPUT_FILE,
+    "w",
+    encoding="utf-8"
+) as file:
+
+    json.dump(
+        verified_results,
+        file,
+        indent=2,
+        ensure_ascii=False
+    )
+
+
+# ============================================================
+# STEP 8: Final summary
+# ============================================================
+
+print("\n" + "=" * 60)
+print("SEARCH AND IDENTITY VERIFICATION SUMMARY")
+print("=" * 60)
+
+print("Company:", company_name)
+print("Product:", product_name)
+
+print("Fields searched:", len(verified_results))
+print("Total raw results:", total_raw)
+print("Verified results:", total_verified)
+print("Rejected results:", total_rejected)
+
+print("\nSaved to:", SEARCH_OUTPUT_FILE)
+
+print("\nSearch and identity verification completed.")

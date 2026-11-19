@@ -1,4 +1,4 @@
-import json
+ import json
 import re
 import requests
 
@@ -20,6 +20,55 @@ REQUEST_TIMEOUT = 300
 MAX_CHUNK_CHARACTERS = 2500
 
 NUM_PREDICT = 512
+
+
+# ============================================================
+# SOURCE PRIORITY
+#
+# Official website first, then LinkedIn, then other websites.
+#
+# For the fields in TIERED_FIELDS the model is shown ONE tier at a
+# time. A lower tier is used only when the better tier gives no
+# verified answer, so a third-party page can never override the
+# company's own website. Change the lists to change the order.
+#
+# Every other field is extracted in one call, with the evidence
+# sorted official -> LinkedIn -> other.
+# ============================================================
+
+TIER_OFFICIAL = "official"
+TIER_LINKEDIN = "linkedin"
+TIER_OTHER = "third_party"
+
+DEFAULT_TIER_ORDER = [TIER_OFFICIAL, TIER_LINKEDIN, TIER_OTHER]
+
+TIERED_FIELDS = {
+    "headquarters": [TIER_OFFICIAL, TIER_LINKEDIN, TIER_OTHER],
+    "employee_count": [TIER_OFFICIAL, TIER_LINKEDIN, TIER_OTHER]
+}
+
+TIER_LABELS = {
+    TIER_OFFICIAL: "official company website",
+    TIER_LINKEDIN: "LinkedIn",
+    TIER_OTHER: "third-party website"
+}
+
+# Extra rules added to the prompt of these fields.
+FIELD_NOTES = {
+    "headquarters": (
+        "Accept an explicit statement of the headquarters or head "
+        "office, or that the company is headquartered or based in a "
+        "place. If several offices are listed and none is marked as "
+        "the headquarters, return null. A registered address, branch "
+        "office or a customer's location is not the headquarters."
+    ),
+    "employee_count": (
+        "Use the company size stated for the company itself: an "
+        "employee count or an employee range. Do not use the number "
+        "of LinkedIn members, followers or associated profiles, a "
+        "number of open jobs, or the size of another company."
+    )
+}
 
 
 # ============================================================
@@ -254,10 +303,52 @@ def result_without_answer(status):
 
 
 # ============================================================
+# SOURCE TIER OF A CHUNK
+# ============================================================
+
+def source_tier(chunk, official_domain=None):
+    """official / linkedin / third_party"""
+
+    domain = (chunk.get("domain") or "").lower()
+
+    if chunk.get("source_type") == "official_website":
+        return TIER_OFFICIAL
+
+    if official_domain:
+
+        official = official_domain.lower()
+
+        if domain == official or domain.endswith("." + official):
+            return TIER_OFFICIAL
+
+    if (
+        chunk.get("source_type") == "linkedin"
+        or domain == "linkedin.com"
+        or domain.endswith(".linkedin.com")
+    ):
+        return TIER_LINKEDIN
+
+    return TIER_OTHER
+
+
+def sort_by_tier(chunks, order, official_domain=None):
+    """Stable sort: best tier first, relevance order kept inside a tier."""
+
+    rank = {tier: index for index, tier in enumerate(order)}
+
+    return sorted(
+        chunks,
+        key=lambda chunk: rank.get(
+            source_tier(chunk, official_domain), len(order)
+        )
+    )
+
+
+# ============================================================
 # PREPARE EVIDENCE FOR ONE FIELD
 # ============================================================
 
-def prepare_field_evidence(evidence_chunks):
+def prepare_field_evidence(evidence_chunks, official_domain=None):
     """
     Prepare webpage evidence and assign source IDs.
     """
@@ -284,6 +375,7 @@ def prepare_field_evidence(evidence_chunks):
         evidence_text.append(
             f"""
 [SOURCE {source_id}]
+Source type: {TIER_LABELS[source_tier(chunk, official_domain)]}
 Title: {source['title']}
 URL: {source['url']}
 Domain: {source['domain']}
@@ -338,17 +430,17 @@ context.
 """
 
 
-def extract_single_field(
+def extract_from_chunks(
     field_name,
     section,
     field_definition,
     evidence_chunks,
     company_name=None,
-    product_name=None
+    product_name=None,
+    official_domain=None
 ):
     """
-    Extract one field using the shared field definition and the
-    supplied webpage evidence.
+    One model call for one field using the given chunks.
 
     Every answer is verified: the evidence must exist in a supplied
     page and the answer must be supported by that page.
@@ -359,13 +451,22 @@ def extract_single_field(
         return result_without_answer("no_relevant_evidence")
 
     evidence_text, sources = prepare_field_evidence(
-        evidence_chunks
+        evidence_chunks, official_domain
     )
 
     source_ids = {
         source["source_id"]: source
         for source in sources
     }
+
+    field_note = ""
+
+    if field_name in FIELD_NOTES:
+
+        field_note = (
+            "FIELD-SPECIFIC RULES:\n"
+            f"{FIELD_NOTES[field_name]}\n\n"
+        )
 
     target = ""
 
@@ -398,7 +499,11 @@ EXPECTED ANSWER FORMAT:
 PREFERRED SOURCES:
 {field_definition.get("source_guidance", "")}
 
-AVAILABLE SOURCE IDs: {", ".join(source_ids.keys())}
+{field_note}AVAILABLE SOURCE IDs: {", ".join(source_ids.keys())}
+
+The sources are listed in priority order. When two sources disagree,
+prefer the lower-numbered source, and an official company website
+over any other source.
 
 WEBPAGE EVIDENCE:
 {evidence_text}
@@ -536,7 +641,7 @@ answer this field for the target company.
     candidate_indexes = []
 
     if source_id in source_ids:
-       candidate_indexes.append(int(source_id[1:]) - 1)
+        candidate_indexes.append(int(source_id[1:]) - 1)
 
     candidate_indexes.extend(
         index for index in range(len(evidence_chunks))
@@ -586,8 +691,77 @@ answer this field for the target company.
         "evidence": evidence.strip(),
         "source_url": selected_source["url"],
         "source_title": selected_source["title"],
+        "source_tier": source_tier(
+            evidence_chunks[selected_index], official_domain
+        ),
         "status": "extracted"
     }
+
+
+# ============================================================
+# EXTRACT ONE FIELD WITH SOURCE PRIORITY
+# ============================================================
+
+def extract_single_field(
+    field_name,
+    section,
+    field_definition,
+    evidence_chunks,
+    company_name=None,
+    product_name=None,
+    official_domain=None
+):
+    """
+    Extract one field, honouring the source priority.
+
+    Fields in TIERED_FIELDS (headquarters, employee_count):
+        official website chunks are tried first; LinkedIn chunks only
+        when the official site gave no verified answer; other
+        websites last.
+
+    Other fields: one call, evidence sorted by tier.
+    """
+
+    if not evidence_chunks:
+
+        return result_without_answer("no_relevant_evidence")
+
+    if field_name not in TIERED_FIELDS:
+
+        return extract_from_chunks(
+            field_name, section, field_definition,
+            sort_by_tier(evidence_chunks, DEFAULT_TIER_ORDER, official_domain),
+            company_name, product_name, official_domain
+        )
+
+    tried = []
+    last_result = None
+
+    for tier in TIERED_FIELDS[field_name]:
+
+        tier_chunks = [
+            chunk for chunk in evidence_chunks
+            if source_tier(chunk, official_domain) == tier
+        ]
+
+        if not tier_chunks:
+            continue
+
+        tried.append(tier)
+
+        result = extract_from_chunks(
+            field_name, section, field_definition, tier_chunks,
+            company_name, product_name, official_domain
+        )
+
+        result["tiers_tried"] = list(tried)
+
+        if result["status"] == "extracted":
+            return result
+
+        last_result = result
+
+    return last_result or result_without_answer("no_relevant_evidence")
 
 
 # ============================================================
@@ -597,7 +771,8 @@ answer this field for the target company.
 def extract_from_web(
     filtered_evidence,
     company_name=None,
-    product_name=None
+    product_name=None,
+    official_domain=None
 ):
     """
     Extract all missing fields using shared field definitions.
@@ -608,6 +783,10 @@ def extract_from_web(
 
     company_name / product_name are optional but recommended: they
     tell the model whose facts to extract.
+
+    official_domain (for example "assessli.com") is optional. Chunks
+    already carry a source_type from the search step; the domain is
+    only a backup for evidence files that do not.
     """
 
     web_results = {}
@@ -659,7 +838,8 @@ def extract_from_web(
             field_definition=definition,
             evidence_chunks=evidence_chunks,
             company_name=company_name,
-            product_name=product_name
+            product_name=product_name,
+            official_domain=official_domain
         )
 
         web_results[field_name] = {
@@ -674,6 +854,8 @@ def extract_from_web(
         if result.get("source_url"):
 
             print("Source:", result["source_url"])
+
+            print("Source type:", result.get("source_tier"))
 
         if result.get("evidence"):
 

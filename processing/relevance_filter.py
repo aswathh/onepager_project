@@ -376,6 +376,18 @@ def calculate_relevance_score(text, field):
 
 MAX_CHUNKS_PER_URL = 2
 
+# For these fields the extractor tries the official website first,
+# then LinkedIn, then other sites. So the selection must contain
+# chunks of every source type, not only the highest-scoring ones
+# (which may all come from third-party pages).
+SOURCE_QUOTA_FIELDS = {"headquarters", "employee_count"}
+
+SOURCE_QUOTAS = {
+    "official_website": 2,
+    "linkedin": 1,
+    "other": 1
+}
+
 
 def filter_chunks_for_field(
     chunks,
@@ -446,17 +458,60 @@ def filter_chunks_for_field(
     # Do not let one long page fill every slot
     selected = []
     per_url = {}
+    per_source = {}
 
-    for chunk in scored_chunks:
+    def take(chunk):
 
         url = chunk.get("url", "")
 
         if per_url.get(url, 0) >= MAX_CHUNKS_PER_URL:
-            continue
+            return False
 
         per_url[url] = per_url.get(url, 0) + 1
 
         selected.append(chunk)
+
+        return True
+
+    if field in SOURCE_QUOTA_FIELDS:
+
+        limit = max(top_k, sum(SOURCE_QUOTAS.values()))
+
+        # Pass 1: guarantee chunks of every source type
+        # (official website, LinkedIn, other), best scores first.
+        for chunk in scored_chunks:
+
+            source = chunk.get("source_type", "other")
+
+            if source not in SOURCE_QUOTAS:
+                source = "other"
+
+            if per_source.get(source, 0) >= SOURCE_QUOTAS[source]:
+                continue
+
+            if take(chunk):
+                per_source[source] = per_source.get(source, 0) + 1
+
+            if len(selected) >= limit:
+                break
+
+        # Pass 2: fill the remaining slots by relevance, so a field
+        # that only has third-party pages still gets top_k chunks.
+        for chunk in scored_chunks:
+
+            if len(selected) >= top_k:
+                break
+
+            if chunk in selected:
+                continue
+
+            take(chunk)
+
+        return selected
+
+    for chunk in scored_chunks:
+
+        take(chunk)
 
         if len(selected) >= top_k:
             break

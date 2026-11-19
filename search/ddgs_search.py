@@ -147,16 +147,37 @@ def build_search_queries(
     company_name,
     product_name,
     section,
-    field
+    field,
+    official_domain=None
 ):
     """
     Generate one or more targeted search queries.
 
     Employee count receives separate official website
     and LinkedIn searches.
+
+    When the official domain is known, headquarters and employee
+    count are first searched on that website itself, so official
+    pages are found even when general search ranks them low.
     """
 
     company = f'"{company_name}"'
+
+    if official_domain and field == "headquarters":
+
+        return [
+            f'site:{official_domain} headquarters contact about us',
+            f'{company} headquarters official',
+            f'{company} company registered office location'
+        ]
+
+    if official_domain and field == "employee_count":
+
+        return [
+            f'site:{official_domain} employees team about us',
+            f'site:linkedin.com/company/ {company} employees',
+            f'{company} company size number of employees'
+        ]
 
     product = ""
 
@@ -498,7 +519,8 @@ def search_missing_fields(
             company_name=company_name,
             product_name=product_name,
             section=section,
-            field=field
+            field=field,
+            official_domain=official_domain
         )
 
         print(
